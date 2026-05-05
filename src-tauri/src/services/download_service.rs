@@ -1,5 +1,7 @@
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::thread;
 
 use crate::models::{
     DownloadHandle,
@@ -25,7 +27,23 @@ use windows_sys::Win32::System::Threading::{
     THREAD_QUERY_LIMITED_INFORMATION,
 };
 
-type DownloadExecutor = fn(&DownloadTask) -> Result<ProcessSnapshot, String>;
+type DownloadExecutorFn = fn(
+    &DownloadTask,
+    &Mutex<QueueState>,
+    &Mutex<Vec<DownloadHandle>>,
+    &dyn Fn(QueueState),
+) -> Result<ProcessSnapshot, String>;
+
+struct DownloadProcessGuard<'a> {
+    download_handles: &'a Mutex<Vec<DownloadHandle>>,
+    task_id: String,
+}
+
+impl Drop for DownloadProcessGuard<'_> {
+    fn drop(&mut self) {
+        let _ = set_download_process_id(self.download_handles, &self.task_id, None);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadControlAction {
@@ -204,18 +222,26 @@ fn set_process_threads_suspended(pid: u32, suspend: bool) -> Result<(), String> 
 pub fn run_download_with_executor(
     task_id: &str,
     queue_state: &Mutex<QueueState>,
-    executor: DownloadExecutor,
+    download_handles: &Mutex<Vec<DownloadHandle>>,
+    executor: DownloadExecutorFn,
 ) -> Result<DownloadTask, String> {
-    run_download_with_executor_and_emitter(task_id, queue_state, executor, |_| {})
+    run_download_with_executor_and_emitter(task_id, queue_state, download_handles, executor, |_| {})
 }
 
-pub fn run_download_with_executor_and_emitter<EmitFn>(
+pub fn run_download_with_executor_and_emitter<ExecutorFn, EmitFn>(
     task_id: &str,
     queue_state: &Mutex<QueueState>,
-    executor: DownloadExecutor,
+    download_handles: &Mutex<Vec<DownloadHandle>>,
+    executor: ExecutorFn,
     emitter: EmitFn,
 ) -> Result<DownloadTask, String>
 where
+    ExecutorFn: Fn(
+        &DownloadTask,
+        &Mutex<QueueState>,
+        &Mutex<Vec<DownloadHandle>>,
+        &dyn Fn(QueueState),
+    ) -> Result<ProcessSnapshot, String>,
     EmitFn: Fn(QueueState),
 {
     let task = queue_service::snapshot(queue_state)
@@ -228,8 +254,12 @@ where
         .ok_or_else(|| format!("Unknown task: {task_id}"))?;
     emitter(queue_service::snapshot(queue_state));
 
-    match executor(&task) {
+    match executor(&task, queue_state, download_handles, &emitter) {
         Ok(process) if process.exit_code == Some(0) => {
+            if is_task_cancelled(queue_state, task_id) {
+                emitter(queue_service::snapshot(queue_state));
+                return Err("Download cancelled".to_string());
+            }
             queue_service::set_progress(queue_state, task_id, process.progress)
                 .ok_or_else(|| format!("Unknown task: {task_id}"))?;
             queue_service::set_download_details(
@@ -245,6 +275,10 @@ where
             Ok(completed)
         }
         Ok(process) => {
+            if is_task_cancelled(queue_state, task_id) {
+                emitter(queue_service::snapshot(queue_state));
+                return Err("Download cancelled".to_string());
+            }
             let _ = queue_service::set_download_details(
                 queue_state,
                 task_id,
@@ -269,39 +303,73 @@ where
     }
 }
 
-pub fn execute_yt_dlp(task: &DownloadTask) -> Result<ProcessSnapshot, String> {
+pub fn execute_yt_dlp(
+    task: &DownloadTask,
+    queue_state: &Mutex<QueueState>,
+    download_handles: &Mutex<Vec<DownloadHandle>>,
+    emitter: &dyn Fn(QueueState),
+) -> Result<ProcessSnapshot, String> {
     let yt_dlp = tools_service::find_required_tool("yt-dlp")
         .ok_or_else(|| "Failed to launch yt-dlp".to_string())?;
 
     let mut command = Command::new(yt_dlp);
-    command.arg(&task.source_url);
+    command.args(build_yt_dlp_args(task));
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    if !task.requested_options.output_dir.is_empty() {
-        command.arg("-P").arg(&task.requested_options.output_dir);
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    set_download_process_id(download_handles, &task.task_id, Some(child.id()))
+        .ok_or_else(|| format!("No download handle found for task: {}", task.task_id))?;
+    let _guard = DownloadProcessGuard {
+        download_handles,
+        task_id: task.task_id.clone(),
+    };
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture yt-dlp stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture yt-dlp stderr".to_string())?;
+
+    let stdout_reader = thread::spawn(move || -> Result<String, String> {
+        let mut buffer = String::new();
+        let mut reader = BufReader::new(stdout);
+        reader
+            .read_to_string(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        Ok(buffer)
+    });
+
+    let mut stderr_reader = BufReader::new(stderr);
+    let mut line = String::new();
+    let mut stderr_buffer = String::new();
+    let mut snapshot = crate::services::process_service::empty_snapshot();
+
+    loop {
+        line.clear();
+        let read_stderr = stderr_reader.read_line(&mut line).map_err(|error| error.to_string())?;
+        if read_stderr == 0 {
+            break;
+        }
+        stderr_buffer.push_str(&line);
+        if update_download_progress_from_line(queue_state, &task.task_id, &mut snapshot, line.trim_end()) {
+            emitter(queue_service::snapshot(queue_state));
+        }
     }
 
-    if task.requested_options.audio_only {
-        command.arg("-x");
-    }
+    let output = child.wait().map_err(|error| error.to_string())?;
+    let stdout_buffer = stdout_reader
+        .join()
+        .map_err(|_| "Failed to collect yt-dlp stdout".to_string())??;
+    let parsed = parse_download_progress(&stdout_buffer, &stderr_buffer, output.code());
 
-    if !task.requested_options.format_id.is_empty() {
-        command.arg("-f").arg(&task.requested_options.format_id);
-    }
-
-    let output = command.output().map_err(|error| error.to_string())?;
-
-    Ok(ProcessSnapshot {
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        exit_code: output.status.code(),
-        progress: if output.status.success() { 1.0 } else { 0.0 },
-        speed_text: None,
-        eta_text: None,
-    })
+    Ok(parsed)
 }
 
 fn build_yt_dlp_args(task: &DownloadTask) -> Vec<String> {
     let mut args = Vec::new();
+    args.push("--newline".to_string());
 
     if !task.requested_options.format_id.is_empty() {
         args.push("-f".to_string());
@@ -474,12 +542,12 @@ fn parse_download_progress(stdout: &str, stderr: &str, exit_code: Option<i32>) -
             progress = (percent / 100.0).clamp(0.0, 1.0);
         }
 
-        if speed_text.is_none() {
-            speed_text = extract_speed(line);
+        if let Some(speed) = extract_speed(line) {
+            speed_text = Some(speed);
         }
 
-        if eta_text.is_none() {
-            eta_text = extract_eta(line);
+        if let Some(eta) = extract_eta(line) {
+            eta_text = Some(eta);
         }
     }
 
@@ -491,6 +559,45 @@ fn parse_download_progress(stdout: &str, stderr: &str, exit_code: Option<i32>) -
         speed_text,
         eta_text,
     }
+}
+
+fn update_download_progress_from_line(
+    queue_state: &Mutex<QueueState>,
+    task_id: &str,
+    snapshot: &mut ProcessSnapshot,
+    line: &str,
+) -> bool {
+    let parsed = parse_download_progress(line, "", None);
+    let mut changed = false;
+
+    if parsed.progress > 0.0 {
+        snapshot.progress = parsed.progress;
+        let _ = queue_service::set_progress(queue_state, task_id, parsed.progress);
+        changed = true;
+    }
+
+    if parsed.speed_text.is_some() || parsed.eta_text.is_some() {
+        snapshot.speed_text = parsed.speed_text.clone();
+        snapshot.eta_text = parsed.eta_text.clone();
+        let _ = queue_service::set_download_details(
+            queue_state,
+            task_id,
+            parsed.speed_text,
+            parsed.eta_text,
+        );
+        changed = true;
+    }
+
+    changed
+}
+
+fn is_task_cancelled(queue_state: &Mutex<QueueState>, task_id: &str) -> bool {
+    queue_service::snapshot(queue_state)
+        .tasks
+        .into_iter()
+        .find(|task| task.task_id == task_id)
+        .map(|task| task.state == "cancelled")
+        .unwrap_or(false)
 }
 
 fn extract_percent(line: &str) -> Option<f64> {
@@ -598,7 +705,7 @@ mod tests {
             &download_handles,
         );
 
-        let result = run_download_with_executor(&task.task_id, &queue_state, |_task| {
+        let result = run_download_with_executor(&task.task_id, &queue_state, &download_handles, |_task, _queue_state, _handles, _emit| {
             Err("Failed to launch yt-dlp".to_string())
         });
 
@@ -625,7 +732,7 @@ mod tests {
             &download_handles,
         );
 
-        run_download_with_executor(&task.task_id, &queue_state, |_task| {
+        run_download_with_executor(&task.task_id, &queue_state, &download_handles, |_task, _queue_state, _handles, _emit| {
             Ok(crate::models::ProcessSnapshot {
                 stdout: "done".to_string(),
                 stderr: String::new(),
@@ -659,7 +766,8 @@ mod tests {
         run_download_with_executor_and_emitter(
             &task.task_id,
             &queue_state,
-            |_task| {
+            &download_handles,
+            |_task, _queue_state, _handles, _emit| {
                 Ok(crate::models::ProcessSnapshot {
                     stdout: "done".to_string(),
                     stderr: String::new(),
@@ -767,6 +875,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_download_progress_prefers_latest_progress_line() {
+        let snapshot = parse_download_progress(
+            "[download]   4.2% of 100.00MiB at 1.00MiB/s ETA 01:30\n[download]  88.8% of 100.00MiB at 4.50MiB/s ETA 00:05",
+            "",
+            Some(1),
+        );
+
+        assert!((snapshot.progress - 0.888).abs() < f64::EPSILON);
+        assert_eq!(snapshot.speed_text.as_deref(), Some("4.50MiB/s"));
+        assert_eq!(snapshot.eta_text.as_deref(), Some("00:05"));
+    }
+
+    #[test]
+    fn update_download_progress_from_line_updates_queue_state_and_snapshot() {
+        let queue_state = Mutex::new(QueueState::default());
+        let download_handles = Mutex::new(Vec::<DownloadHandle>::new());
+        let task = create_download_task(
+            "https://example.com/watch?v=progress".to_string(),
+            DownloadOptions::default(),
+            &queue_state,
+            &download_handles,
+        );
+        queue_service::mark_downloading(&queue_state, &task.task_id).expect("task should exist");
+
+        let mut snapshot = crate::services::process_service::empty_snapshot();
+        let changed = update_download_progress_from_line(
+            &queue_state,
+            &task.task_id,
+            &mut snapshot,
+            "[download]  42.3% of 100.00MiB at 3.20MiB/s ETA 00:18",
+        );
+
+        let state = queue_service::snapshot(&queue_state);
+
+        assert!(changed);
+        assert!((snapshot.progress - 0.423).abs() < f64::EPSILON);
+        assert_eq!(snapshot.speed_text.as_deref(), Some("3.20MiB/s"));
+        assert_eq!(snapshot.eta_text.as_deref(), Some("00:18"));
+        assert_eq!(state.tasks[0].progress, 0.423);
+        assert_eq!(state.tasks[0].speed_text.as_deref(), Some("3.20MiB/s"));
+        assert_eq!(state.tasks[0].eta_text.as_deref(), Some("00:18"));
+    }
+
+    #[test]
     fn control_download_updates_real_task_state_and_process_handle() {
         let queue_state = Mutex::new(QueueState::default());
         let download_handles = Mutex::new(Vec::<DownloadHandle>::new());
@@ -842,6 +994,57 @@ mod tests {
                 "Cancel:4242".to_string()
             ]
         );
+        assert_eq!(snapshot.tasks[0].state, "cancelled");
+        assert!(snapshot.active_task_id.is_none());
+        assert_eq!(handles[0].child_process_id, None);
+    }
+
+    #[test]
+    fn run_download_with_executor_preserves_cancelled_state_after_executor_finishes() {
+        let queue_state = Mutex::new(QueueState::default());
+        let download_handles = Mutex::new(Vec::<DownloadHandle>::new());
+        let task = create_download_task(
+            "https://example.com/watch?v=cancel".to_string(),
+            DownloadOptions::default(),
+            &queue_state,
+            &download_handles,
+        );
+        let task_id = task.task_id.clone();
+        let _ = set_download_process_id(&download_handles, &task_id, Some(9001));
+        queue_service::mark_downloading(&queue_state, &task_id).expect("task should exist");
+
+        let result = run_download_with_executor_and_emitter(
+            &task_id,
+            &queue_state,
+            &download_handles,
+            |_task, queue_state, download_handles, emit| {
+                let _ = control_download_with(
+                    &task_id,
+                    queue_state,
+                    download_handles,
+                    DownloadControlAction::Cancel,
+                    |_action, _pid| Ok::<(), String>(()),
+                );
+                emit(queue_service::snapshot(queue_state));
+                Ok(crate::models::ProcessSnapshot {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    progress: 1.0,
+                    speed_text: Some("9.0MiB/s".to_string()),
+                    eta_text: Some("00:00".to_string()),
+                })
+            },
+            |_| {},
+        );
+
+        let snapshot = queue_service::snapshot(&queue_state);
+        let handles = download_handles
+            .lock()
+            .expect("download handles lock poisoned")
+            .clone();
+
+        assert!(result.is_err());
         assert_eq!(snapshot.tasks[0].state, "cancelled");
         assert!(snapshot.active_task_id.is_none());
         assert_eq!(handles[0].child_process_id, None);

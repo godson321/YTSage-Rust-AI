@@ -249,6 +249,7 @@ fn schedule_download(task_id: String, app_handle: AppHandle) {
         let _ = download_service::run_download_with_executor_and_emitter(
             &task_id,
             &state.queue_state,
+            &state.download_handles,
             download_service::execute_yt_dlp,
             |snapshot| {
                 let _ = app_handle.emit(QUEUE_STATE_CHANGED_EVENT, snapshot);
