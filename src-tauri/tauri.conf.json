@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "YTSage Rust",
+  "version": "0.1.0",
+  "identifier": "com.ytsage.rust",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm.cmd run dev",
+    "beforeBuildCommand": "npm.cmd run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "YTSage Rust",
+        "width": 1440,
+        "height": 920
+      }
+    ]
+  },
+  "bundle": {
+    "active": false
+  }
+}
