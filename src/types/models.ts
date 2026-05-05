@@ -35,6 +35,10 @@ export interface FormatItem {
   filesize?: number;
   hasAudio: boolean;
   isAudioOnly: boolean;
+  videoCodec?: string;
+  audioCodec?: string;
+  fps?: number;
+  dynamicRange?: string;
 }
 
 export interface AnalysisItem {

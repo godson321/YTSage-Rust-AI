@@ -22,6 +22,8 @@ pub fn run() {
             commands::get_queue_snapshot,
             commands::clear_queue,
             commands::pause_task,
+            commands::resume_task,
+            commands::cancel_task,
             commands::retry_task,
             commands::get_tool_status,
             commands::get_update_status

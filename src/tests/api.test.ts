@@ -41,12 +41,16 @@ describe("tauri api wrapper", () => {
     await api.getQueueSnapshot();
     await api.clearQueue();
     await api.pauseTask("task-1");
+    await api.resumeTask("task-1");
+    await api.cancelTask("task-1");
     await api.retryTask("task-1");
 
     expect(invoke).toHaveBeenNthCalledWith(1, "get_queue_snapshot");
     expect(invoke).toHaveBeenNthCalledWith(2, "clear_queue");
     expect(invoke).toHaveBeenNthCalledWith(3, "pause_task", { taskId: "task-1" });
-    expect(invoke).toHaveBeenNthCalledWith(4, "retry_task", { taskId: "task-1" });
+    expect(invoke).toHaveBeenNthCalledWith(4, "resume_task", { taskId: "task-1" });
+    expect(invoke).toHaveBeenNthCalledWith(5, "cancel_task", { taskId: "task-1" });
+    expect(invoke).toHaveBeenNthCalledWith(6, "retry_task", { taskId: "task-1" });
   });
 
   it("maps queue state event subscription", async () => {

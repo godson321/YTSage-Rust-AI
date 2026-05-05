@@ -140,9 +140,23 @@ mod tests {
             DownloadOptions::default(),
             &state,
         );
+        crate::services::download_service::set_download_process_id(
+            &state.download_handles,
+            &first.task_id,
+            Some(1234),
+        )
+        .expect("first task handle should exist");
+        crate::services::queue_service::mark_downloading(&state.queue_state, &first.task_id)
+            .expect("first task should be active");
 
-        let paused = commands::pause_task_with_state(first.task_id.clone(), &state)
-            .expect("first task should pause");
+        let paused = crate::services::download_service::control_download_with(
+            &first.task_id,
+            &state.queue_state,
+            &state.download_handles,
+            crate::services::download_service::DownloadControlAction::Pause,
+            |_action, _pid| Ok::<(), String>(()),
+        )
+        .expect("first task should pause");
         let retried = commands::retry_task_with_state(first.task_id.clone(), &state)
             .expect("first task should retry");
         let snapshot = commands::get_queue_snapshot_with_state(&state);

@@ -32,6 +32,25 @@ pub fn pause_task(queue_state: &Mutex<QueueState>, task_id: &str) -> Option<Down
     Some(state.tasks[index].clone())
 }
 
+pub fn resume_task(queue_state: &Mutex<QueueState>, task_id: &str) -> Option<DownloadTask> {
+    let mut state = queue_state.lock().expect("queue state lock poisoned");
+    let index = state.tasks.iter().position(|task| task.task_id == task_id)?;
+    state.tasks[index].state = "downloading".to_string();
+    state.active_task_id = Some(task_id.to_string());
+    Some(state.tasks[index].clone())
+}
+
+pub fn cancel_task(queue_state: &Mutex<QueueState>, task_id: &str) -> Option<DownloadTask> {
+    let mut state = queue_state.lock().expect("queue state lock poisoned");
+    let index = state.tasks.iter().position(|task| task.task_id == task_id)?;
+    state.tasks[index].state = "cancelled".to_string();
+    state.tasks[index].error = None;
+    if state.active_task_id.as_deref() == Some(task_id) {
+        state.active_task_id = None;
+    }
+    Some(state.tasks[index].clone())
+}
+
 pub fn fail_task(queue_state: &Mutex<QueueState>, task_id: &str, error: &str) -> Option<DownloadTask> {
     let mut state = queue_state.lock().expect("queue state lock poisoned");
     let index = state.tasks.iter().position(|task| task.task_id == task_id)?;
@@ -59,6 +78,19 @@ pub fn set_progress(
     let mut state = queue_state.lock().expect("queue state lock poisoned");
     let index = state.tasks.iter().position(|task| task.task_id == task_id)?;
     state.tasks[index].progress = progress.clamp(0.0, 1.0);
+    Some(state.tasks[index].clone())
+}
+
+pub fn set_download_details(
+    queue_state: &Mutex<QueueState>,
+    task_id: &str,
+    speed_text: Option<String>,
+    eta_text: Option<String>,
+) -> Option<DownloadTask> {
+    let mut state = queue_state.lock().expect("queue state lock poisoned");
+    let index = state.tasks.iter().position(|task| task.task_id == task_id)?;
+    state.tasks[index].speed_text = speed_text;
+    state.tasks[index].eta_text = eta_text;
     Some(state.tasks[index].clone())
 }
 
@@ -146,6 +178,26 @@ mod tests {
     }
 
     #[test]
+    fn resume_and_cancel_update_real_task_states() {
+        let queue_state = Mutex::new(QueueState::default());
+        let task = create_queued_task(
+            "https://example.com/watch?v=abc123".to_string(),
+            DownloadOptions::default(),
+        );
+        enqueue(task.clone(), &queue_state);
+        mark_downloading(&queue_state, &task.task_id).expect("task should exist");
+        pause_task(&queue_state, &task.task_id).expect("task should pause");
+
+        let resumed = resume_task(&queue_state, &task.task_id).expect("task should resume");
+        assert_eq!(resumed.state, "downloading");
+
+        let cancelled = cancel_task(&queue_state, &task.task_id).expect("task should cancel");
+        let snapshot = snapshot(&queue_state);
+        assert_eq!(cancelled.state, "cancelled");
+        assert!(snapshot.active_task_id.is_none());
+    }
+
+    #[test]
     fn retry_task_marks_failed_item_queued_again() {
         let queue_state = Mutex::new(QueueState::default());
         let task = create_queued_task(
@@ -178,6 +230,16 @@ mod tests {
 
         let progressed = set_progress(&queue_state, &task.task_id, 1.5).expect("task should exist");
         assert_eq!(progressed.progress, 1.0);
+
+        let detailed = set_download_details(
+            &queue_state,
+            &task.task_id,
+            Some("3.20MiB/s".to_string()),
+            Some("00:18".to_string()),
+        )
+        .expect("task should exist");
+        assert_eq!(detailed.speed_text.as_deref(), Some("3.20MiB/s"));
+        assert_eq!(detailed.eta_text.as_deref(), Some("00:18"));
 
         let completed = mark_completed(&queue_state, &task.task_id, Some("C:/tmp/file.mp4".to_string()))
             .expect("task should complete");

@@ -55,6 +55,12 @@ export const api = {
   pauseTask(taskId: string) {
     return invoke<DownloadTask | null>("pause_task", { taskId });
   },
+  resumeTask(taskId: string) {
+    return invoke<DownloadTask | null>("resume_task", { taskId });
+  },
+  cancelTask(taskId: string) {
+    return invoke<DownloadTask | null>("cancel_task", { taskId });
+  },
   retryTask(taskId: string) {
     return invoke<DownloadTask | null>("retry_task", { taskId });
   },

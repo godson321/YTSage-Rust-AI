@@ -260,6 +260,10 @@ fn parse_format_item(value: &Value) -> FormatItem {
             .and_then(Value::as_str)
             .map(|codec| codec == "none")
             .unwrap_or(false),
+        video_codec: string_field_opt(value, "vcodec"),
+        audio_codec: string_field_opt(value, "acodec"),
+        fps: value.get("fps").and_then(Value::as_f64),
+        dynamic_range: string_field_opt(value, "dynamic_range"),
     }
 }
 
@@ -606,6 +610,58 @@ mod tests {
         assert_eq!(item.formats.as_ref().unwrap().len(), 1);
         assert!(item.available_subtitles.is_some());
         assert!(item.available_automatic_subtitles.is_some());
+    }
+
+    #[test]
+    fn parse_analysis_item_maps_rich_format_fields_for_download_page() {
+        let payload = serde_json::json!({
+            "id": "rich-format-video",
+            "title": "Rich Format Video",
+            "channel": "Format Channel",
+            "duration": 95,
+            "thumbnail": "https://img.example/rich-format.jpg",
+            "_type": "video",
+            "webpage_url": "https://example.com/watch?v=rich-format-video",
+            "formats": [
+                {
+                    "format_id": "137",
+                    "ext": "mp4",
+                    "resolution": "1920x1080",
+                    "filesize": 104857600,
+                    "acodec": "none",
+                    "vcodec": "avc1.640028",
+                    "fps": 60,
+                    "dynamic_range": "SDR"
+                },
+                {
+                    "format_id": "251",
+                    "ext": "webm",
+                    "resolution": "audio only",
+                    "filesize_approx": 73400320,
+                    "acodec": "opus",
+                    "vcodec": "none",
+                    "dynamic_range": "HDR"
+                }
+            ]
+        });
+
+        let item = parse_analysis_item(
+            "https://example.com/watch?v=rich-format-video",
+            payload,
+        );
+
+        let formats = item.formats.expect("formats should be present");
+        assert_eq!(formats.len(), 2);
+
+        assert_eq!(formats[0].video_codec.as_deref(), Some("avc1.640028"));
+        assert_eq!(formats[0].audio_codec.as_deref(), Some("none"));
+        assert_eq!(formats[0].fps, Some(60.0));
+        assert_eq!(formats[0].dynamic_range.as_deref(), Some("SDR"));
+
+        assert_eq!(formats[1].video_codec.as_deref(), Some("none"));
+        assert_eq!(formats[1].audio_codec.as_deref(), Some("opus"));
+        assert_eq!(formats[1].fps, None);
+        assert_eq!(formats[1].dynamic_range.as_deref(), Some("HDR"));
     }
 
     #[test]

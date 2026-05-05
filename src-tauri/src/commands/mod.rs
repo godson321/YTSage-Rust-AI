@@ -150,7 +150,57 @@ pub fn pause_task(task_id: String, app_handle: AppHandle, state: State<AppState>
 }
 
 pub fn pause_task_with_state(task_id: String, state: &AppState) -> Option<DownloadTask> {
-    queue_service::pause_task(&state.queue_state, &task_id)
+    download_service::control_download(
+        &task_id,
+        &state.queue_state,
+        &state.download_handles,
+        download_service::DownloadControlAction::Pause,
+    )
+    .ok()
+}
+
+#[tauri::command]
+pub fn resume_task(task_id: String, app_handle: AppHandle, state: State<AppState>) -> Option<DownloadTask> {
+    let task = resume_task_with_state(task_id, &state);
+    if task.is_some() {
+        let _ = app_handle.emit(
+            QUEUE_STATE_CHANGED_EVENT,
+            queue_service::snapshot(&state.queue_state),
+        );
+    }
+    task
+}
+
+pub fn resume_task_with_state(task_id: String, state: &AppState) -> Option<DownloadTask> {
+    download_service::control_download(
+        &task_id,
+        &state.queue_state,
+        &state.download_handles,
+        download_service::DownloadControlAction::Resume,
+    )
+    .ok()
+}
+
+#[tauri::command]
+pub fn cancel_task(task_id: String, app_handle: AppHandle, state: State<AppState>) -> Option<DownloadTask> {
+    let task = cancel_task_with_state(task_id, &state);
+    if task.is_some() {
+        let _ = app_handle.emit(
+            QUEUE_STATE_CHANGED_EVENT,
+            queue_service::snapshot(&state.queue_state),
+        );
+    }
+    task
+}
+
+pub fn cancel_task_with_state(task_id: String, state: &AppState) -> Option<DownloadTask> {
+    download_service::control_download(
+        &task_id,
+        &state.queue_state,
+        &state.download_handles,
+        download_service::DownloadControlAction::Cancel,
+    )
+    .ok()
 }
 
 #[tauri::command]

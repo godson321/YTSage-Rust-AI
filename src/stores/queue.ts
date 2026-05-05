@@ -97,6 +97,26 @@ export const useQueueStore = defineStore("queue", {
       }
       return task;
     },
+    async resume(taskId: string) {
+      const task = await api.resumeTask(taskId);
+      if (!task) {
+        return null;
+      }
+      this.tasks = this.tasks.map((item) => (item.taskId === taskId ? task : item));
+      this.activeTaskId = task.taskId;
+      return task;
+    },
+    async cancel(taskId: string) {
+      const task = await api.cancelTask(taskId);
+      if (!task) {
+        return null;
+      }
+      this.tasks = this.tasks.map((item) => (item.taskId === taskId ? task : item));
+      if (this.activeTaskId === taskId) {
+        this.activeTaskId = null;
+      }
+      return task;
+    },
     async retry(taskId: string) {
       const task = await api.retryTask(taskId);
       if (!task) {

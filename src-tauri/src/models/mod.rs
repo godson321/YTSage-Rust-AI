@@ -35,6 +35,10 @@ pub struct FormatItem {
     pub filesize: Option<u64>,
     pub has_audio: bool,
     pub is_audio_only: bool,
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
+    pub fps: Option<f64>,
+    pub dynamic_range: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +241,8 @@ pub struct ProcessSnapshot {
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub progress: f64,
+    pub speed_text: Option<String>,
+    pub eta_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

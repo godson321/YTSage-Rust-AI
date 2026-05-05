@@ -6,5 +6,7 @@ pub fn empty_snapshot() -> ProcessSnapshot {
         stderr: String::new(),
         exit_code: None,
         progress: 0.0,
+        speed_text: None,
+        eta_text: None,
     }
 }

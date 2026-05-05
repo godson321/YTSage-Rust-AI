@@ -5,12 +5,20 @@ import type { DownloadTask, QueueState } from "../types/models";
 const createDownloadTask = vi.fn();
 const getQueueSnapshot = vi.fn();
 const listenQueueStateChanged = vi.fn();
+const pauseTask = vi.fn();
+const resumeTask = vi.fn();
+const cancelTask = vi.fn();
+const retryTask = vi.fn();
 
 vi.mock("../services/tauri/api", () => ({
   api: {
     createDownloadTask: (...args: unknown[]) => createDownloadTask(...args),
     getQueueSnapshot: (...args: unknown[]) => getQueueSnapshot(...args),
-    listenQueueStateChanged: (...args: unknown[]) => listenQueueStateChanged(...args)
+    listenQueueStateChanged: (...args: unknown[]) => listenQueueStateChanged(...args),
+    pauseTask: (...args: unknown[]) => pauseTask(...args),
+    resumeTask: (...args: unknown[]) => resumeTask(...args),
+    cancelTask: (...args: unknown[]) => cancelTask(...args),
+    retryTask: (...args: unknown[]) => retryTask(...args)
   }
 }));
 
@@ -21,6 +29,10 @@ beforeEach(() => {
   createDownloadTask.mockReset();
   getQueueSnapshot.mockReset();
   listenQueueStateChanged.mockReset();
+  pauseTask.mockReset();
+  resumeTask.mockReset();
+  cancelTask.mockReset();
+  retryTask.mockReset();
 });
 
 describe("queue store", () => {
@@ -158,6 +170,40 @@ describe("queue store", () => {
     expect(store.tasks).toHaveLength(1);
     expect(store.tasks[0].taskId).toBe("task-2");
     expect(store.tasks[0].state).toBe("completed");
+    expect(store.activeTaskId).toBeNull();
+  });
+
+  it("pauses resumes and cancels tasks through the backend api", async () => {
+    const store = useQueueStore();
+    store.tasks = [
+      {
+        taskId: "task-1",
+        sourceUrl: "https://example.com/a",
+        title: null,
+        state: "downloading",
+        progress: 0.4,
+        speedText: "1.2MiB/s",
+        etaText: "00:10",
+        outputPath: null,
+        error: null
+      }
+    ];
+    store.activeTaskId = "task-1";
+
+    pauseTask.mockResolvedValue({ ...store.tasks[0], state: "paused" });
+    resumeTask.mockResolvedValue({ ...store.tasks[0], state: "downloading" });
+    cancelTask.mockResolvedValue({ ...store.tasks[0], state: "cancelled" });
+
+    const paused = await store.pause("task-1");
+    expect(paused?.state).toBe("paused");
+    expect(store.activeTaskId).toBeNull();
+
+    const resumed = await store.resume("task-1");
+    expect(resumed?.state).toBe("downloading");
+    expect(store.activeTaskId).toBe("task-1");
+
+    const cancelled = await store.cancel("task-1");
+    expect(cancelled?.state).toBe("cancelled");
     expect(store.activeTaskId).toBeNull();
   });
 });
